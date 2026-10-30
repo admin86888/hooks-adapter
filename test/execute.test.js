@@ -115,6 +115,23 @@ test('shell: timeout kills the process and yields an error outcome', async () =>
   assert.ok(Date.now() - started < 5000)
 })
 
+// Regression: a per-hook timeout measured in milliseconds (ruflo writes
+// "timeout": 5000 meaning 5 s) would otherwise become 5000 s. clampTimeoutSec
+// caps it so a stuck hook cannot stall the turn.
+test('shell: clampTimeoutSec caps a millisecond-style timeout', async () => {
+  const hook = {
+    id: 't',
+    kind: 'shell',
+    spec: { command: `node "${script('slow.mjs')}"` },
+    onError: 'warn',
+    timeoutSec: 5000,
+  }
+  const started = Date.now()
+  const { outcome } = await executeHook(runtimeOptions({ clampTimeoutSec: 1 }), hook, baseCtx)
+  assert.match(outcome.stderr, /timed out/i)
+  assert.ok(Date.now() - started < 5000, 'clamped instead of waiting 5000 s')
+})
+
 test('shell: onError block escalates a timeout to a denial', async () => {
   const hook = {
     id: 't',

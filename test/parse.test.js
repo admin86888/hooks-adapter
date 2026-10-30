@@ -39,6 +39,28 @@ test('claude dialect: matcher on a subject-less event yields a warning, matcher 
   assert.equal(group.matcher, undefined)
 })
 
+// Regression: PreCompact accepts a matcher (the compaction trigger). Before the
+// fix the matcher was dropped with a "no matcher subject" warning, so a config
+// with manual + auto groups ran all four handlers on every compaction.
+test('claude dialect: PreCompact keeps its manual/auto matcher', () => {
+  const raw = {
+    hooks: {
+      PreCompact: [
+        { matcher: 'manual', hooks: [{ type: 'command', command: 'echo compact-manual' }] },
+        { matcher: 'auto', hooks: [{ type: 'command', command: 'echo compact-auto' }] },
+      ],
+    },
+  }
+  const { groups, diagnostics } = parseRaw(raw, 'claude')
+  assert.deepEqual(diagnostics, [])
+  const compact = groups.filter((g) => g.event === 'PreCompact')
+  assert.equal(compact.length, 2)
+  assert.deepEqual(
+    compact.map((g) => g.matcher),
+    ['manual', 'auto'],
+  )
+})
+
 test('claude dialect: unknown events are reported and skipped', () => {
   const { groups, diagnostics } = parseFile(fixture('claude-settings.json'), 'claude', {})
   assert.equal(groups.some((g) => g.event === 'UnknownEvent'), false)

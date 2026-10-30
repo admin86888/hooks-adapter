@@ -146,3 +146,21 @@ test('loadRuntime: per-event groups are flattened with dialect tags', () => {
   assert.equal(groups[0].matcher, 'bash')
   rmSync(cwd, { recursive: true, force: true })
 })
+
+test('loadRuntime: clampTimeoutSec diagnoses oversized per-hook timeouts', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'hooks-adapter-cwd-'))
+  // 5000 here is milliseconds written into Claude's seconds field (ruflo does this).
+  write(cwd, '.claude/settings.json', {
+    hooks: {
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'guard', timeout: 5000 }] }],
+      Stop: [{ hooks: [{ type: 'command', command: 'sane', timeout: 10 }] }],
+    },
+  })
+  const runtime = loadRuntime({ cwd, homeDir: cwd, clampTimeoutSec: 30 })
+  const warnings = runtime.diagnostics.filter((d) => d.severity === 'warning' && /clamped/.test(d.message))
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0].message, /PreToolUse/)
+  // A timeout under the clamp is left alone.
+  assert.equal(runtime.diagnostics.some((d) => /Stop/.test(d.message) && /clamped/.test(d.message)), false)
+  rmSync(cwd, { recursive: true, force: true })
+})

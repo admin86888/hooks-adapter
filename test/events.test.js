@@ -135,3 +135,17 @@ test('subject derivation from payload', () => {
   assert.equal(subjectFor('tool:before', {}), '')
   assert.equal(subjectFor('session:start', { source: 'resume' }), 'resume')
 })
+
+// Regression: PreCompact's matcher subject is the compaction trigger. Treating
+// the event as subject-less dropped "manual"/"auto" matchers and ran every
+// group on every compaction (ruflo 3.63.8 writes one manual + one auto group,
+// so session-end fired twice per compaction).
+test('compact:before has the trigger as its matcher subject', () => {
+  assert.equal(EVENT_META['compact:before'].subject, 'trigger')
+  assert.equal(subjectFor('compact:before', { trigger: 'manual' }), 'manual')
+  assert.equal(subjectFor('compact:before', { trigger: 'auto' }), 'auto')
+  assert.equal(subjectFor('compact:before', { compaction_trigger: 'auto' }), 'auto')
+  assert.equal(subjectFor('compact:before', {}), '')
+  assert.equal(matches('manual', 'manual', 'literal'), true)
+  assert.equal(matches('manual', 'auto', 'literal'), false)
+})

@@ -23,7 +23,7 @@
  *   projectDir, pluginRoot    ${CLAUDE_PROJECT_DIR} / ${CLAUDE_PLUGIN_ROOT}
  *   llm          { baseUrl, model, apiKey? } for oracle hooks
  *   proxy        { command } default runner for proxy hooks
- *   timeoutSec, onError, stderrCap   runtime defaults
+ *   timeoutSec, clampTimeoutSec, onError, stderrCap   runtime defaults
  */
 
 import { randomUUID } from 'node:crypto'
