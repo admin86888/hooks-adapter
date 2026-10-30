@@ -5,6 +5,7 @@ import {
   EVENT_META,
   DIALECTS,
   canonicalFor,
+  claudeToolName,
   namesFor,
   resolveEventName,
   subjectFor,
@@ -148,4 +149,23 @@ test('compact:before has the trigger as its matcher subject', () => {
   assert.equal(subjectFor('compact:before', {}), '')
   assert.equal(matches('manual', 'manual', 'literal'), true)
   assert.equal(matches('manual', 'auto', 'literal'), false)
+})
+
+// Regression: DSH exposes lowercase tool ids (`bash`, `write`) while Claude
+// matchers say `Bash`, `Write|Edit|MultiEdit`. Matching the raw host id skipped
+// every tool hook on DSH — including ruflo's pre-bash deny gate.
+test('claudeToolName maps host tool ids onto Claude matcher names', () => {
+  assert.equal(claudeToolName('bash'), 'Bash')
+  assert.equal(claudeToolName('write'), 'Write')
+  assert.equal(claudeToolName('edit'), 'Edit')
+  assert.equal(claudeToolName('Bash'), 'Bash')
+  assert.equal(claudeToolName('host-only-tool'), 'host-only-tool')
+  assert.equal(claudeToolName(''), '')
+  assert.equal(claudeToolName(undefined), '')
+})
+
+test('claude matchers match a translated host tool id', () => {
+  assert.equal(matches('Bash', claudeToolName('bash'), 'literal'), true)
+  assert.equal(matches('Write|Edit|MultiEdit', claudeToolName('write'), 'literal'), true)
+  assert.equal(matches('Write|Edit|MultiEdit', claudeToolName('bash'), 'literal'), false)
 })

@@ -8,7 +8,7 @@
  * points (reject / deny / ask / block / steer / inject).
  *
  * Mapping (harness event -> hooks event):
- *   agent/session-start        -> SessionStart   (inject context)
+ *   agent/created              -> SessionStart   (inject context)
  *   session/disposed           -> SessionEnd     (observe)
  *   agent/pre-step (waterfall) -> UserPromptSubmit (reject or add context)
  *   tools/pre-execute          -> PreToolUse     (deny / ask)
@@ -30,7 +30,7 @@ import { randomUUID } from 'node:crypto'
 import { loadRuntime } from '../lib/config.js'
 import { dispatchEvent } from '../lib/dispatch.js'
 import { buildPayload } from '../lib/contract.js'
-import { canonicalFor } from '../lib/events.js'
+import { canonicalFor, claudeToolName } from '../lib/events.js'
 
 export const name = 'hooks-adapter'
 // No hard service dependencies: optional services are looked up lazily via
@@ -40,8 +40,11 @@ export const inject = []
 /** The agent_type reported for subagent hooks (harness subagents carry no kind label). */
 const SUBAGENT_TYPE = 'general-purpose'
 
-/** Stable id of the source stamped on injected context. */
-const PLUGIN_SOURCE = { kind: 'plugin', plugin: name }
+/** Stable id of the source stamped on injected context.
+ * DSH format v4 rejects the retired `kind: 'plugin'` wrapper: durable messages
+ * must carry a producer-owned kind, which for a plugin is `plugin:<package name>`
+ * (see @deepseek-ai/dsh-session-format-v3-to-v4 producerKind()). */
+const PLUGIN_SOURCE = { kind: `plugin:${name}` }
 
 export function apply(ctx, config = {}) {
   const options = {
@@ -175,18 +178,27 @@ export function apply(ctx, config = {}) {
     return userMessage(blocks(result.outcome.contexts))
   }
 
-  // --- SessionStart: inject context when the hook resolves ---
-  ctx.on('agent/session-start', ({ agent, source }) => {
+  // --- SessionStart: prepend context to the first step ---
+  // DSH 0.2.x emits `agent/created` (serial per agent) and has no
+  // `agent/session-start`; the serial listener failing the harness would be a
+  // boot error, so this handler must stay non-throwing.
+  //
+  // The hook's stdout is *session context*, not a new user turn: awaiting
+  // `agent.inject()` here started an extra turn whose prompt was the restored
+  // session text, and the model answered that instead of the real task. Buffer
+  // the contexts and prepend them to the first `agent/pre-step` instead, the
+  // same way Claude Code folds SessionStart additionalContext into the session.
+  let sessionContexts = []
+  let sessionStartSettled = Promise.resolve()
+  ctx.on('agent/created', ({ agent }) => {
     if (!agent) return
-    const payload = buildPayload('claude', canonicalFor('claude', 'SessionStart'), { ...baseData(agent), source: source ?? '' })
-    track(
-      runPoint('SessionStart', source ?? '', payload, { agent, signal: controller.signal })
-        .then(async (result) => {
-          const message = await contextMessage(result)
-          if (message) agent.inject(message)
-        })
-        .catch((err) => ctx.logger.warn(`hooks-adapter: SessionStart hook failed: ${String(err)}`)),
-    )
+    const payload = buildPayload('claude', canonicalFor('claude', 'SessionStart'), { ...baseData(agent), source: '' })
+    sessionStartSettled = runPoint('SessionStart', '', payload, { agent, signal: controller.signal })
+      .then((result) => {
+        sessionContexts = [...sessionContexts, ...result.outcome.contexts]
+      })
+      .catch((err) => ctx.logger.warn(`hooks-adapter: SessionStart hook failed: ${String(err)}`))
+    track(sessionStartSettled)
   })
 
   // --- SessionEnd: observe only ---
@@ -210,26 +222,40 @@ export function apply(ctx, config = {}) {
   // --- UserPromptSubmit: reject or add context ---
   ctx.on('agent/pre-step', async ({ agent, messages, turn, signal }, next) => {
     if (!messages || messages.length === 0) return next()
+    // Fold any SessionStart context in front of the first prompt (see above).
+    await sessionStartSettled
+    const pendingSession = sessionContexts
+    sessionContexts = []
     const text = blocksToText(messages.flatMap((m) => m.content ?? []))
     const payload = buildPayload('claude', canonicalFor('claude', 'UserPromptSubmit'), { ...baseData(agent), prompt: text })
     const result = await runPoint('UserPromptSubmit', '', payload, { agent, turn, signal })
     if (result.outcome.decision === 'deny') return { kind: 'reject' }
     const downstream = await next()
     const message = await contextMessage(result)
-    if (!message || downstream.kind !== 'enter') return downstream
-    return { kind: 'enter', messages: [...downstream.messages, message] }
+    if (downstream.kind !== 'enter') return downstream
+    const sessionMessage = pendingSession.length > 0 ? await userMessage(blocks(pendingSession)) : undefined
+    if (!message && !sessionMessage) return downstream
+    return {
+      kind: 'enter',
+      messages: [
+        ...(sessionMessage ? [sessionMessage] : []),
+        ...downstream.messages,
+        ...(message ? [message] : []),
+      ],
+    }
   })
 
   // --- PreToolUse: deny / ask ---
   ctx.on('tools/pre-execute', async (exec, next) => {
     if (!exec) return next()
+    const toolName = claudeToolName(exec.name ?? '')
     const payload = buildPayload('claude', canonicalFor('claude', 'PreToolUse'), {
       ...baseData(exec.agent),
-      toolName: exec.name,
+      toolName,
       toolInput: exec.arguments,
       toolUseId: exec.callId,
     })
-    const result = await runPoint('PreToolUse', exec.name ?? '', payload, {
+    const result = await runPoint('PreToolUse', toolName, payload, {
       agent: exec.agent,
       turn: lastTurn(exec.agent),
       signal: exec.signal,
@@ -248,14 +274,15 @@ export function apply(ctx, config = {}) {
     if (!exec) return next()
     const failed = result?.isError === true
     const point = failed ? 'PostToolUseFailure' : 'PostToolUse'
+    const toolName = claudeToolName(exec.name ?? '')
     const payload = buildPayload('claude', canonicalFor('claude', point), {
       ...baseData(exec.agent),
-      toolName: exec.name,
+      toolName,
       toolInput: exec.arguments,
       toolUseId: exec.callId,
       toolResponse: blocksToText(result?.content ?? []),
     })
-    const outcome = await runPoint(point, exec.name ?? '', payload, {
+    const outcome = await runPoint(point, toolName, payload, {
       agent: exec.agent,
       turn: lastTurn(exec.agent),
       signal: exec.signal,

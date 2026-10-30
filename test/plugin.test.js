@@ -103,7 +103,7 @@ test('plugin: subscribes to the harness extension points', () => {
   const harness = makeHarness()
   apply(harness.ctx, { configPath: join(dir, '.claude', 'settings.json') })
   for (const name of [
-    'agent/session-start',
+    'agent/created',
     'session/disposed',
     'agent/pre-step',
     'tools/pre-execute',
@@ -175,7 +175,10 @@ test('plugin: UserPromptSubmit denial rejects the step, context appends to enter
   }))
   assert.equal(enter.kind, 'enter')
   assert.equal(enter.messages.length, 2)
-  assert.equal(enter.messages[1].source.kind, 'plugin')
+  // DSH format v4 rejects the retired `kind: 'plugin'` wrapper: the source kind
+  // must be producer-owned (`plugin:<package>`), or session adoption throws
+  // "format v4 message requires a producer-owned source kind".
+  assert.equal(enter.messages[1].source.kind, 'plugin:hooks-adapter')
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -191,15 +194,37 @@ test('plugin: Stop denial steers the agent to continue', async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-test('plugin: SessionStart context is injected once the detached hook settles', async () => {
+// SessionStart output is session context, not a user turn: injecting it with
+// `agent.inject` started an extra turn whose prompt was the restored-session
+// text (observed on DSH 0.2.1-rc.2: the model answered the restored session
+// instead of the task). It must be prepended to the first step instead.
+test('plugin: SessionStart context is prepended to the first step, not injected', async () => {
   const dir = makeProject()
   const harness = makeHarness()
   apply(harness.ctx, { configPath: join(dir, '.claude', 'settings.json') })
   const agent = makeAgent()
-  harness.handlers.get('agent/session-start')({ agent, source: 'new' })
-  await waitFor(() => agent.injected.length === 1, 'session-start injection')
-  assert.equal(agent.injected[0].role, 'user')
-  assert.ok(agent.injected[0].content[0].text.startsWith('got:{"session_id"'))
+  harness.handlers.get('agent/created')({ agent })
+  // Wait for the detached SessionStart run to settle before the first step.
+  await new Promise((resolve) => setImmediate(resolve))
+  const enter = await harness.handlers.get('agent/pre-step')(
+    {
+      agent,
+      messages: [{ content: [{ type: 'text', text: 'hello' }] }],
+      turn: 1,
+      signal: new AbortController().signal,
+    },
+    async () => ({
+      kind: 'enter',
+      messages: [{ id: 'm1', role: 'user', content: [], source: { kind: 'user' } }],
+    }),
+  )
+  assert.equal(agent.injected.length, 0)
+  assert.equal(enter.kind, 'enter')
+  const session = enter.messages[0]
+  assert.equal(session.role, 'user')
+  assert.ok(session.content[0].text.startsWith('got:{"session_id"'))
+  // the real user message stays behind the session context
+  assert.equal(enter.messages[1].id, 'm1')
   await disposeAll(harness)
   rmSync(dir, { recursive: true, force: true })
 })
